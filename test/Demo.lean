@@ -50,3 +50,10 @@ open Fixture
 example (n : Nat) (h : IsShiny n) : IsSparkly n := by
   suggest?
   sorry
+
+/- ── 5. CLOSED-TACTIC suggestion (the `hint`-style panel) ─────────────────────
+   No named lemma is needed: a closed core tactic solves the goal outright. It's
+   reported as the tactic to run, with NO import (it doesn't name a library lemma),
+   and ranks ahead of import-needing closers.
+   EXPECT (ranked first, no import line):  omega -/
+#suggest (∀ a b : Nat, a + b + 0 = b + a)

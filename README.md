@@ -140,8 +140,9 @@ separate tools already exist):
 - **Single-step only** — one library lemma + bounded `solveByElim`; no multi-tactic
   chaining (that's "hammer" territory). The partial-match output (`apply …` leaving
   subgoals) is the only nod toward partial progress.
-- **Only suggests `exact`/`apply`/`rw`** — not `simp`/`cases`/`induction`. Those have
-  their own search tactics (`simp?`, `hint`). (`rw?` is now covered — see below.)
+- **Suggests `exact`/`apply`/`rw` and a small set of closed tactics** (`omega`/`simp`/
+  `trivial`, via the `hint`-style panel) — not `cases`/`induction`, and not full
+  multi-tactic chaining. (`rw?` and the closed-tactic panel are covered — see Roadmap §1–2.)
 
 The first idea that *extended this tool along its own axis* — an **import-resolving
 `rw?`**, suggesting a rewrite lemma from an unimported module together with its `import` —
@@ -180,16 +181,22 @@ Three concrete additions, easiest first:
   `rewriteHits` and `searchCandidates` are now uniform `panel` members (see the `Searcher`
   refactor above), so the next additions just append to `panel`.
 
-### 2. A `hint`-style panel (medium)
-- **Reuse:** Mathlib's `hint` (`Mathlib.Tactic.Hint`) already runs a registered list of
-  tactics and reports which close the goal — read its harness for how to run a tactic
-  syntax against a goal mvar and detect closure.
-- **Slot in:** add *closed* procedures — `omega`, `ring`, `decide`, `simp`, `aesop` — run in
-  the **current** env (they don't reference unimported named lemmas, so `mods := []`, no
-  import needed). Keep the *search* members (`exact?`/`apply?`/`rw?`) on the constructed env.
-- **Gotchas:** ranking now spans tactic kinds — policy: full closers first, then fewer
-  imports, then partials. `simp` does NOT cross files cleanly (unimported `@[simp]` lemmas
-  aren't in the active simp set), so treat `simp?` as in-scope-only.
+### 2. A `hint`-style panel — ✅ **DONE**
+- **Built as:** `hintHits` runs a list of closed tactics (`hintTactics := ["omega", "simp",
+  "trivial"]`) against the goal — parsing each as `tactic` syntax and running it via
+  `Lean.Elab.Tactic.run` — and keeps the ones that leave no subgoals (à la Mathlib's `hint`,
+  but reusing only **Lean core** tactics, so no Mathlib/aesop dependency). Each becomes a
+  `Hit` with `kind := .tacticClose`, `tactic := "omega"` (etc.), `mods := []`. Reported as the
+  tactic to run, never auto-`exact`'d. Add a tactic by appending to `hintTactics`.
+- **Ranking implemented:** `allHits` now orders **full closers first, then fewer imports,
+  then partials** — so a no-import closer (`omega`, or an in-scope lemma) outranks an
+  import-needing one.
+- **Notes:** these are in-scope procedures; if one closes the goal the two-tier logic never
+  reaches the cross-file search, so they effectively only matter over the current env.
+  `decide` is intentionally excluded (can blow up). `ring`/`aesop` are left out to avoid a
+  Mathlib/aesop dependency — add them if your project already depends on them. `simp` does
+  NOT cross files cleanly (unimported `@[simp]` lemmas aren't in the active simp set), so it
+  stays in-scope-only — which the panel already is.
 
 ### 3. Multi-step chaining via `aesop` over the constructed environment (research spike)
 - **Reuse:** `aesop` (already a dependency) does best-first *backward* multi-step search.

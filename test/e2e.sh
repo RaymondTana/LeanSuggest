@@ -44,6 +44,8 @@ check "apply partial found"         "apply Fixture.sparkly_of_shiny"
 check "rw lemma found"              "rw [Fixture.frob_eq]"
 # 4. Local hypothesis discharged cross-file.
 check "local-hyp closer found"      "Fixture.sparkly_of_shiny h"
+# 5. Closed-tactic (hint-style) panel: a core tactic closes the goal, no import.
+check "hint tactic closer found"    "1. omega"
 
 echo "────────────────────────────────────────────────────────"
 if [ "$fail" -eq 0 ]; then

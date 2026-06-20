@@ -102,13 +102,15 @@ def roundTrips (type : Expr) (termStr : String) : MetaM Bool := do
       catch _ => return false
 
 /-- What flavour of suggestion a `Hit` is. `exactClose`/`applyPartial` come from the
-    library-search engine; `rewrite` from Lean core's `rw?` engine. Only `exactClose`
-    hits carry a proof term we can `exact` to close the goal (see `Hit.autoCloseable`);
-    a `rewrite` is reported/applied as `rw […]` text, never auto-`exact`'d. -/
+    library-search engine; `rewrite` from Lean core's `rw?` engine; `tacticClose` from the
+    `hint`-style panel (a closed tactic like `omega`/`simp` that solves the goal outright).
+    Only `exactClose` hits carry a proof term we can `exact` to close the goal (see
+    `Hit.autoCloseable`); `rewrite`/`tacticClose` are reported/applied as their tactic text. -/
 inductive HitKind where
   | exactClose
   | applyPartial
   | rewrite
+  | tacticClose
   deriving Inhabited, DecidableEq
 
 /-- One search result. -/
@@ -281,6 +283,35 @@ def rewriteHits (baseline : Environment) (type : Expr) (maxHits : Nat := 6) :
     hits := hits.push hit
   return hits
 
+/-- Closed tactics the `hint`-style panel tries: each either solves the goal outright or is
+    discarded. Kept to **Lean core** procedures (no Mathlib/aesop dependency); extend freely.
+    `decide` is omitted on purpose — it can blow up / loop on large goals. -/
+def hintTactics : List String := ["omega", "simp", "trivial"]
+
+/-- The `hint`-style panel: run each closed tactic in `hintTactics` against the goal and keep
+    the ones that **fully close** it (à la Mathlib's `hint`). These are in-scope procedures —
+    they don't name unimported lemmas — so `mods := []` (no import to add) and they're only
+    useful over the current env (if one closes the goal, the two-tier logic never reaches the
+    cross-file search). Reported as the tactic text (e.g. `omega`), never auto-`exact`'d. -/
+def hintHits (type : Expr) : MetaM (Array Hit) := withoutModifyingState do
+  let mut hits : Array Hit := #[]
+  for tacStr in hintTactics do
+    match Lean.Parser.runParserCategory (← getEnv) `tactic tacStr with
+    | .error _   => pure ()
+    | .ok stx    =>
+      -- Run the tactic on a fresh goal of `type` in the ambient local context; keep it only
+      -- if it leaves no subgoals. `Tactic.run` returns the remaining goals; a throw = failure.
+      let proof? ← Lean.Elab.Term.TermElabM.run' do
+        try
+          let goal := (← mkFreshExprMVar type).mvarId!
+          let remaining ← Lean.Elab.Tactic.run goal (Lean.Elab.Tactic.evalTactic stx)
+          if remaining.isEmpty then return some (← instantiateMVars (mkMVar goal)) else return none
+        catch _ => return none
+      if let some proof := proof? then
+        hits := hits.push
+          { proof, isFull := true, kind := .tacticClose, tactic := tacStr, display := tacStr, mods := [] }
+  return hits
+
 /-- A panel member: given the `baseline` environment (whose imports we diff against to find
     the `import` to add) and the goal `type`, produce its hits. It runs in the ambient
     `MetaM` context (the goal's local hypotheses are in scope) and over whatever environment
@@ -293,15 +324,20 @@ abbrev Searcher := Environment → Expr → MetaM (Array Hit)
     Add a searcher here (and nowhere else) to extend what `suggest?`/`#suggest` can suggest. -/
 def panel : List Searcher :=
   [ (fun baseline type => searchCandidates baseline type)   -- exact / apply, via librarySearch
-  , (fun baseline type => rewriteHits baseline type) ]      -- rw, via core's rw? engine
+  , (fun baseline type => rewriteHits baseline type)        -- rw, via core's rw? engine
+  , (fun _ type => hintHits type) ]                         -- omega/simp/trivial closers (no import)
 
-/-- The full candidate set for a goal: every panel member's hits, ranked with full closers
-    first (stable — preserves each searcher's own order, and the panel's order between them). -/
+/-- The full candidate set for a goal: every panel member's hits, ranked **full closers first,
+    then by fewer imports, then partials** — within each group, stably (preserving each
+    searcher's own order and the panel's order between them). Spanning tactic kinds, a closer
+    that needs no `import` (e.g. `omega`, or an in-scope lemma) thus outranks one that does. -/
 def allHits (baseline : Environment) (type : Expr) : MetaM (Array Hit) := do
   let mut combined : Array Hit := #[]
   for searcher in panel do
     combined := combined ++ (← searcher baseline type)
-  return combined.filter (·.isFull) ++ combined.filter (fun h => !h.isFull)
+  let fulls := combined.filter (·.isFull)
+  let parts := combined.filter (fun h => !h.isFull)
+  return fulls.filter (·.mods.isEmpty) ++ fulls.filter (fun h => !h.mods.isEmpty) ++ parts
 
 /-- Run a `MetaM` action over an arbitrary environment (e.g. the constructed env). -/
 def runMetaOver {α : Type} (env : Environment) (opts : Options) (act : MetaM α) : IO α := do
@@ -344,7 +380,7 @@ def renderHits (hits : Array Hit) : MessageData :=
     let imp := if h.mods.isEmpty then ""
       else s!"    [add: {String.intercalate ", " (h.mods.map (fun m => s!"import {m}"))}]"
     s!"  {i + 1}. {h.display}{imp}"
-  m!"suggest? — suggestions (`exact` closes the goal; `apply`/`rw` transform it):\n{String.intercalate "\n" lines}"
+  m!"suggest? — suggestions (`exact`/`omega`/… close the goal; `apply`/`rw` transform it):\n{String.intercalate "\n" lines}"
 
 /-- `#suggest (T)` — query form, like `#check`/`#eval`: prints ranked suggestions + imports
     for the goal type `T`, with no proof/goal state. -/

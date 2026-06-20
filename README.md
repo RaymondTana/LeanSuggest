@@ -155,9 +155,12 @@ search over the *constructed environment*, then map the proof's constants → th
 modules → the `import` to add (`searchCandidates` + the `modsOf` step in `Basic.lean`).
 Anything that (a) runs over a custom `Environment` and (b) yields an inspectable proof can
 plug into it. So "stronger `suggest?`" = **more searchers behind the same post-pass**, not
-a new engine. The clean refactor is a `Searcher := MVarId → MetaM (Array Hit)` abstraction
-that `suggestHits` runs as a panel (some members over the current env, some over the
-constructed env) and merges/ranks via `renderHits`.
+a new engine. This refactor is now in place: a `Searcher := Environment → Expr → MetaM (Array
+Hit)` abstraction with a `panel : List Searcher` that `allHits` runs and merges/ranks (full
+closers first). Adding a searcher means **appending one entry to `panel`** — nothing else
+changes. (The signature is `(baseline, type)` rather than the originally-sketched `MVarId`,
+because both existing members create their own goal mvar and run in the ambient local
+context; the panel runs over whatever env the caller set — current or constructed.)
 
 Three concrete additions, easiest first:
 
@@ -174,8 +177,8 @@ Three concrete additions, easiest first:
   ranks full closers first. `=`/`↔` **local hypotheses** are offered as rewrites too.
 - **Status / next:** a rewrite *transforms* rather than closes, so rw hits are reported (and
   applied via the lightbulb), never auto-`exact`'d — pair with step 3 for "rw then close".
-  A `Searcher := MVarId → MetaM (Array Hit)` abstraction (above) would make `rewriteHits` and
-  `searchCandidates` uniform panel members; `allHits` is the current ad-hoc merge.
+  `rewriteHits` and `searchCandidates` are now uniform `panel` members (see the `Searcher`
+  refactor above), so the next additions just append to `panel`.
 
 ### 2. A `hint`-style panel (medium)
 - **Reuse:** Mathlib's `hint` (`Mathlib.Tactic.Hint`) already runs a registered list of

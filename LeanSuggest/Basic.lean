@@ -281,12 +281,26 @@ def rewriteHits (baseline : Environment) (type : Expr) (maxHits : Nat := 6) :
     hits := hits.push hit
   return hits
 
-/-- The full candidate set for a goal: library-search hits (`exact`/`apply`) plus rewrite
-    hits (`rw`), ranked with full closers first (stable — preserves each engine's own order).
-    This is the small panel the README's roadmap envisions; a future `Searcher` abstraction
-    would make adding more members (a `hint`-style panel, `aesop`) uniform. -/
+/-- A panel member: given the `baseline` environment (whose imports we diff against to find
+    the `import` to add) and the goal `type`, produce its hits. It runs in the ambient
+    `MetaM` context (the goal's local hypotheses are in scope) and over whatever environment
+    the caller has set (the current env, or the constructed cross-file env). Today's members
+    are `searchCandidates` (`exact`/`apply`) and `rewriteHits` (`rw`); the roadmap's `hint`
+    panel and `aesop` slot in by appending to `panel`. -/
+abbrev Searcher := Environment → Expr → MetaM (Array Hit)
+
+/-- The searcher panel. Each runs over the same scope; `allHits` merges and ranks their hits.
+    Add a searcher here (and nowhere else) to extend what `suggest?`/`#suggest` can suggest. -/
+def panel : List Searcher :=
+  [ (fun baseline type => searchCandidates baseline type)   -- exact / apply, via librarySearch
+  , (fun baseline type => rewriteHits baseline type) ]      -- rw, via core's rw? engine
+
+/-- The full candidate set for a goal: every panel member's hits, ranked with full closers
+    first (stable — preserves each searcher's own order, and the panel's order between them). -/
 def allHits (baseline : Environment) (type : Expr) : MetaM (Array Hit) := do
-  let combined := (← searchCandidates baseline type) ++ (← rewriteHits baseline type)
+  let mut combined : Array Hit := #[]
+  for searcher in panel do
+    combined := combined ++ (← searcher baseline type)
   return combined.filter (·.isFull) ++ combined.filter (fun h => !h.isFull)
 
 /-- Run a `MetaM` action over an arbitrary environment (e.g. the constructed env). -/

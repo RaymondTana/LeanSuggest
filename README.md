@@ -14,6 +14,10 @@ finder, `mkLibrarySearchLemma`, `apply`, `solveByElim`) — it does not call tho
 and drives its own candidate loop so it can return **multiple** results and **partial**
 matches (`apply`, à la `apply?`), not just the first full closer.
 
+It also runs Lean core's **`rw?` engine** (`Lean.Meta.Rewrites`) over the same scopes, so it
+suggests **rewrite** lemmas — including ones from unimported modules, with the `import` to
+add. (This is the first roadmap item, now built; see "Roadmap" below.)
+
 ## What you get
 
 | Form | Kind | Use |
@@ -23,7 +27,8 @@ matches (`apply`, à la `apply?`), not just the first full closer.
 | 💡 lightbulb | LSP code action | on a `suggest?` tactic: one click inserts the import + replaces it |
 
 Full closers are suggested as `exact …`; partial matches as `apply …` with their
-leftover subgoals.
+leftover subgoals; rewrite lemmas as `rw […]` (or `rw [← …]`) with the rewritten goal
+(or "closes by rfl"). Full `exact` closers rank first.
 
 ## Install
 
@@ -114,12 +119,13 @@ separate tools already exist):
 - **Single-step only** — one library lemma + bounded `solveByElim`; no multi-tactic
   chaining (that's "hammer" territory). The partial-match output (`apply …` leaving
   subgoals) is the only nod toward partial progress.
-- **Only suggests `exact`/`apply`** — not `rw`/`simp`/`cases`/`induction`. Those have
-  their own search tactics (`rw?`, `simp?`, `hint`).
+- **Only suggests `exact`/`apply`/`rw`** — not `simp`/`cases`/`induction`. Those have
+  their own search tactics (`simp?`, `hint`). (`rw?` is now covered — see below.)
 
-The one idea that could *extend this tool along its own axis*: an **import-resolving
-`rw?`** — suggest a rewrite lemma from an unimported module together with its `import`.
-That would be the natural sequel, not a fix to the search engine.
+The first idea that *extended this tool along its own axis* — an **import-resolving
+`rw?`**, suggesting a rewrite lemma from an unimported module together with its `import` —
+is now **built** (see "Roadmap" §1). It was the natural sequel: more searcher behind the
+same import-resolving post-pass, not a fix to the search engine.
 
 ## Roadmap: a stronger `suggest?` (panel + shared post-pass)
 
@@ -134,15 +140,21 @@ constructed env) and merges/ranks via `renderHits`.
 
 Three concrete additions, easiest first:
 
-### 1. Import-resolving `rw?` (recommended first; low risk)
-- **Reuse:** Mathlib's `rw?` engine, `Mathlib.Tactic.Rewrites` (`rewrites`/`rewriteCandidates`)
-  — the rewrite analogue of `librarySearch`, backed by its own discrimination tree of
-  `Eq`/`Iff` lemmas.
-- **Slot in:** run it over `constructedEnv`; each candidate is `(rewriteLemma, rewrittenGoal)`.
-  Emit a `Hit` with `tactic := s!"rw [{rewriteLemma}]"`, `mods := moduleOf rewriteLemma`, and
-  the rewritten goal as the "leaves" (it's naturally a *partial* match in our model).
-- **Gotchas:** many candidates (rank, cap); a rewrite usually transforms rather than closes,
-  so pair it with step 3 if you want "rw then close".
+### 1. Import-resolving `rw?` — ✅ **DONE**
+- **Reuse:** Lean **core**'s `rw?` engine, `Lean.Meta.Rewrites` (`findRewrites` /
+  `rewriteCandidates`, with `createModuleTreeRef` + `localHypotheses`) — the rewrite analogue
+  of `librarySearch`, backed by its own discrimination tree of `Eq`/`Iff` lemmas. *(This
+  engine moved from Mathlib into Lean core, so — unlike the original plan — it adds **no
+  Mathlib dependency**; it's reused exactly like `librarySearch`.)*
+- **Built as:** `rewriteHits` in `Basic.lean` runs `findRewrites` over the search env; each
+  result becomes a `Hit` with `kind := .rewrite`, `tactic := "rw [lemma]"` (or `rw [← lemma]`),
+  `mods` diffed against the baseline env (the cross-file import payoff), and the rewritten goal
+  (or "closes by rfl") as its display. `allHits` merges these with the `exact`/`apply` hits and
+  ranks full closers first. `=`/`↔` **local hypotheses** are offered as rewrites too.
+- **Status / next:** a rewrite *transforms* rather than closes, so rw hits are reported (and
+  applied via the lightbulb), never auto-`exact`'d — pair with step 3 for "rw then close".
+  A `Searcher := MVarId → MetaM (Array Hit)` abstraction (above) would make `rewriteHits` and
+  `searchCandidates` uniform panel members; `allHits` is the current ad-hoc merge.
 
 ### 2. A `hint`-style panel (medium)
 - **Reuse:** Mathlib's `hint` (`Mathlib.Tactic.Hint`) already runs a registered list of

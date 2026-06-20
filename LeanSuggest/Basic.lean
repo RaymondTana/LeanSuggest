@@ -2,6 +2,7 @@ import Lean.Elab.Command
 import Lean.Elab.Term
 import Lean.Elab.Tactic.Basic
 import Lean.Meta.Tactic.LibrarySearch
+import Lean.Meta.Tactic.Rewrites
 import Lean.Meta.Tactic.TryThis
 import Batteries.CodeAction
 
@@ -87,18 +88,39 @@ def roundTrips (type : Expr) (termStr : String) : MetaM Bool := do
         return !(← instantiateMVars e).hasExprMVar
       catch _ => return false
 
+/-- What flavour of suggestion a `Hit` is. `exactClose`/`applyPartial` come from the
+    library-search engine; `rewrite` from Lean core's `rw?` engine. Only `exactClose`
+    hits carry a proof term we can `exact` to close the goal (see `Hit.autoCloseable`);
+    a `rewrite` is reported/applied as `rw […]` text, never auto-`exact`'d. -/
+inductive HitKind where
+  | exactClose
+  | applyPartial
+  | rewrite
+  deriving Inhabited, DecidableEq
+
 /-- One search result. -/
 structure Hit where
-  /-- The (possibly partial) proof term — used to close the goal when `isFull`. -/
+  /-- The (possibly partial) proof term. Used to close the goal only when `autoCloseable`;
+      for `rewrite` hits this is just the lemma `Expr` (we never `exact` it). -/
   proof   : Expr
-  /-- True if it fully closes the goal (`exact`); false if it leaves subgoals (`apply`). -/
+  /-- True if the suggestion alone resolves the goal: an `exactClose` proof, or a `rewrite`
+      that closes by `rfl`. Drives ranking and the Tier-2 escalation gate. -/
   isFull  : Bool
-  /-- Tactic text to insert: `exact …` or `apply …`. -/
+  /-- Which engine/flavour produced this hit. -/
+  kind    : HitKind
+  /-- Tactic text to insert: `exact …`, `apply …`, or `rw […]`. -/
   tactic  : String
-  /-- Human-readable line (adds the leftover subgoals for partial matches). -/
+  /-- Human-readable line (adds the leftover subgoals / rewritten goal for partial matches). -/
   display : String
   /-- Modules used by the proof that the baseline env lacks (the imports to add). -/
   mods    : List Name
+
+/-- Can the tactic close the goal directly by `exact h.proof`? Only full library-search
+    closers qualify — a `rewrite` is applied as `rw […]`, not as an `exact`. -/
+def Hit.autoCloseable (h : Hit) : Bool :=
+  match h.kind with
+  | .exactClose => h.isFull
+  | _           => false
 
 /-- Find ranked library lemmas for `type`: full closers (`exact`) first, then partial
     matches (`apply`, with leftover subgoals). Runs in the ambient local context, so
@@ -123,13 +145,13 @@ def searchCandidates (baseline : Environment) (type : Expr)
     let termStr := toString (← Meta.ppExpr proof)
     if proof.hasExprMVar || !(← roundTrips type termStr) then return none
     let txt := s!"exact {termStr}"
-    return some { proof, isFull := true, tactic := txt, display := txt, mods := modsOf proof }
+    return some { proof, isFull := true, kind := .exactClose, tactic := txt, display := txt, mods := modsOf proof }
   -- Build a partial-match `Hit` (no validation: `apply <name>` is a single ident
   -- that always re-parses; the leftover subgoals are pretty-printed for display).
   let mkPartialHit (name : Name) (proof : Expr) (remaining : List MVarId) : MetaM Hit := do
     let tyStrs ← remaining.mapM fun sg => sg.withContext do
       return s!"⊢ {← Meta.ppExpr (← instantiateMVars (← sg.getType))}"
-    return { proof, isFull := false, tactic := s!"apply {name}",
+    return { proof, isFull := false, kind := .applyPartial, tactic := s!"apply {name}",
              display := s!"apply {name}   (leaves {remaining.length}: " ++
                String.intercalate ", " tyStrs ++ ")",
              mods := modsOf proof }
@@ -193,6 +215,67 @@ def searchCandidates (baseline : Environment) (type : Expr)
     | none => pure ()
   return full ++ part
 
+/-- Find ranked **rewrite** lemmas for `type`, via Lean core's `rw?` engine
+    (`Lean.Meta.Rewrites`) — the rewrite analogue of `librarySearch`, backed by its own
+    discrimination tree of `Eq`/`Iff` lemmas. Like `searchCandidates` this reuses a core
+    `MetaM` procedure (it does NOT call the `rw?` *tactic*); `findRewrites` already drives
+    its own candidate loop and returns multiple results.
+
+    Each result becomes a `Hit` with `tactic := "rw [lemma]"` (or `rw [← lemma]`). A rewrite
+    *transforms* the goal, so it is a partial match in our model (`isFull := false`), unless
+    it closes the goal by `rfl` (`isFull := true`); either way it is reported/applied as
+    `rw […]`, never `exact`'d. `baseline` is diffed against to compute the import(s) to add
+    — exactly the cross-file payoff: a rewrite lemma from an unimported module surfaces with
+    the `import` that brings it into scope. Runs in the ambient local context, so `=`/`↔`
+    local hypotheses are offered as rewrites too. -/
+def rewriteHits (baseline : Environment) (type : Expr) (maxHits : Nat := 6) :
+    MetaM (Array Hit) := withoutModifyingState do
+  let env ← getEnv
+  let hm := moduleTable env
+  -- Imports the rewrite lemma needs that `baseline` doesn't already provide (cf. `searchCandidates`).
+  let modsOf (e : Expr) : List Name :=
+    let needed := (collectConsts e).toList.filter (fun c => !baseline.contains c)
+    (needed.map (moduleOf env hm)).filter (fun m => !isNoiseModule m) |>.eraseDups
+  let goal0 := (← mkFreshExprMVar type).mvarId!
+  -- `intro` a ∀-goal's binders first: a subterm under a binder (e.g. `frob n` in
+  -- `∀ n, P (frob n)`) mentions the bound variable, which `rw`/`kabstract` cannot abstract,
+  -- so the rewrite silently fails. After `intros` the binder is a free fvar and rewriting
+  -- works — this is what the `rw?` tactic does. (Mirrors `searchCandidates`'s ∀ handling.)
+  let (_, searchGoal) ← if type.isForall then goal0.intros else pure (#[], goal0)
+  -- `createModuleTreeRef` indexes the env we're running in (current or constructed);
+  -- `findRewrites` respects the (raised) heartbeat budget. Be defensive: any failure → no hits.
+  let results ← searchGoal.withContext do
+    try
+      let target ← instantiateMVars (← searchGoal.getType)
+      let moduleRef ← Lean.Meta.Rewrites.createModuleTreeRef
+      let hyps ← Lean.Meta.Rewrites.localHypotheses
+      Lean.Meta.Rewrites.findRewrites hyps moduleRef searchGoal target (stopAtRfl := false) (max := maxHits)
+    catch _ => pure []
+  let mut hits : Array Hit := #[]
+  -- Pretty-print under `searchGoal`'s context (intro'd fvars in scope) and the result's mctx,
+  -- so the lemma and the rewritten goal render with real hypothesis/variable names.
+  for r in results do
+    let hit ← searchGoal.withContext <| withMCtx r.mctx do
+      let lem ← instantiateMVars r.expr
+      let arrow := if r.symm then "← " else ""
+      let tac := s!"rw [{arrow}{toString (← Meta.ppExpr lem)}]"
+      let display ←
+        if r.rfl? then pure s!"{tac}   (closes by rfl)"
+        else match r.newGoal with
+          | some g => do pure s!"{tac}   (⊢ {← Meta.ppExpr (← instantiateMVars g)})"
+          | none   => pure tac
+      pure { proof := lem, isFull := r.rfl?, kind := .rewrite, tactic := tac, display, mods := modsOf lem }
+    hits := hits.push hit
+  return hits
+
+/-- The full candidate set for a goal: library-search hits (`exact`/`apply`) plus rewrite
+    hits (`rw`), ranked with full closers first (stable — preserves each engine's own order).
+    This is the small panel the README's roadmap envisions; a future `Searcher` abstraction
+    would make adding more members (a `hint`-style panel, `aesop`) uniform. -/
+def allHits (baseline : Environment) (type : Expr) : MetaM (Array Hit) := do
+  let combined := (← searchCandidates baseline type) ++ (← rewriteHits baseline type)
+  return combined.filter (·.isFull) ++ combined.filter (fun h => !h.isFull)
+
 /-- Run a `MetaM` action over an arbitrary environment (e.g. the constructed env). -/
 def runMetaOver {α : Type} (env : Environment) (opts : Options) (act : MetaM α) : IO α := do
   let coreCtx : Core.Context := { fileName := "<suggest>", fileMap := .ofString "", options := opts }
@@ -222,7 +305,7 @@ def constructedEnv (cur : Environment) (opts : Options) : IO Environment := do
 def suggestHits (baseline : Environment) (opts : Options)
     (lctx : LocalContext) (linsts : LocalInstances) (type : Expr) : IO (Array Hit) := do
   let go (searchEnv : Environment) : IO (Array Hit) :=
-    runMetaOver searchEnv opts <| withLCtx lctx linsts (searchCandidates baseline type)
+    runMetaOver searchEnv opts <| withLCtx lctx linsts (allHits baseline type)
   let inScope ← go baseline
   if inScope.any (·.isFull) then return inScope
   let crossFile ← go (← constructedEnv baseline opts)
@@ -234,7 +317,7 @@ def renderHits (hits : Array Hit) : MessageData :=
     let imp := if h.mods.isEmpty then ""
       else s!"    [add: {String.intercalate ", " (h.mods.map (fun m => s!"import {m}"))}]"
     s!"  {i + 1}. {h.display}{imp}"
-  m!"suggest? — suggestions (`exact` closes the goal; `apply` leaves subgoals):\n{String.intercalate "\n" lines}"
+  m!"suggest? — suggestions (`exact` closes the goal; `apply`/`rw` transform it):\n{String.intercalate "\n" lines}"
 
 /-- `#suggest (T)` — query form, like `#check`/`#eval`: prints ranked suggestions + imports
     for the goal type `T`, with no proof/goal state. -/
@@ -254,7 +337,8 @@ elab "#suggest " t:term : command => do
 open Lean.Meta.Tactic.TryThis Elab.Tactic in
 /-- `suggest?` — like `exact?`/`apply?`, but if no *imported* lemma closes the goal it
 also searches the rest of the project and reports the lemma + the `import` to add.
-Full closers show as `exact`, partial matches as `apply`. -/
+Full closers show as `exact`; partial matches as `apply`; rewrite lemmas (from Lean
+core's `rw?` engine, including from unimported modules) as `rw […]`. -/
 elab (name := suggestImportTac) "suggest?" : tactic => do
   let goal ← getMainGoal
   let opts := searchOpts (← getOptions)
@@ -262,18 +346,23 @@ elab (name := suggestImportTac) "suggest?" : tactic => do
   let (lctx, linsts, type) ← goal.withContext do
     pure ((← getLCtx), (← getLocalInstances), (← instantiateMVars (← goal.getType)))
   -- Tier 1: current env, in the goal's context.
-  let inScope ← goal.withContext (withOptions (fun _ => opts) (searchCandidates curEnv type))
-  match inScope.find? (·.isFull) with
+  let inScope ← goal.withContext (withOptions (fun _ => opts) (allHits curEnv type))
+  match inScope.find? (·.autoCloseable) with
   | some h =>
       -- An imported lemma closes it: actually close the goal and emit "Try this", like `exact?`.
       closeMainGoal `suggest? h.proof
       addExactSuggestion (← getRef) h.proof
       if inScope.size > 1 then logInfo (renderHits inScope)
   | none =>
+      if inScope.any (·.isFull) then
+        -- An in-scope *rewrite* closes the goal (by `rfl`) but isn't `exact`-able; report it
+        -- (the lightbulb applies the `rw […]`) rather than escalating to the project search.
+        logInfo (renderHits inScope)
+        return
       -- Tier 2: constructed env (+ partial matches). We can't `exact` an unimported lemma
       -- (the kernel would reject it), so we only report — the code action applies it.
       let crossFile ← runMetaOver (← constructedEnv curEnv opts) opts
-        (withLCtx lctx linsts (searchCandidates curEnv type))
+        (withLCtx lctx linsts (allHits curEnv type))
       let hits := if crossFile.isEmpty then inScope else crossFile
       if hits.isEmpty then
         throwError "suggest? found nothing that applies, even across the project."

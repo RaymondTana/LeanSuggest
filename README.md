@@ -97,6 +97,30 @@ These are the gaps a maintainer should tackle (also flagged in `Basic.lean`):
 - **∀-quantified equality goals lose symm-awareness** (the `∀` branch uses the plain
   finder, not the symm-aware one).
 
+## Scope vs. general "library-search is dumb" critiques
+
+LeanSuggest is a **thin layer** over `exact?`/`apply?` that adds **scope**
+(cross-file / unimported) and **actionability** (import resolution + a code action).
+It deliberately does **not** try to make the underlying *search* smarter, so the common
+critique list of `apply?` (multi-step chaining, rewriting, case-splits, ML ranking, …) is
+mostly **orthogonal** to this tool. Note too that several such critiques are factually off
+about `apply?` as it stands: it **does** use local hypotheses (via `solveByElim`), **is**
+symm-aware, **does** rank by discrimination-tree relevance, and **does** emit `refine … ?_`
+when metavariables remain.
+
+Genuinely accurate limitations that LeanSuggest **inherits** (and that are non-goals here —
+separate tools already exist):
+
+- **Single-step only** — one library lemma + bounded `solveByElim`; no multi-tactic
+  chaining (that's "hammer" territory). The partial-match output (`apply …` leaving
+  subgoals) is the only nod toward partial progress.
+- **Only suggests `exact`/`apply`** — not `rw`/`simp`/`cases`/`induction`. Those have
+  their own search tactics (`rw?`, `simp?`, `hint`).
+
+The one idea that could *extend this tool along its own axis*: an **import-resolving
+`rw?`** — suggest a rewrite lemma from an unimported module together with its `import`.
+That would be the natural sequel, not a fix to the search engine.
+
 ## Provenance
 
 Extracted from a POC built inside `formalising-mathematics-notes`. The engine is a single

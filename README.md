@@ -121,6 +121,61 @@ The one idea that could *extend this tool along its own axis*: an **import-resol
 `rw?`** — suggest a rewrite lemma from an unimported module together with its `import`.
 That would be the natural sequel, not a fix to the search engine.
 
+## Roadmap: a stronger `suggest?` (panel + shared post-pass)
+
+The import-resolution here is a **tactic-agnostic post-pass**: run a proof-producing
+search over the *constructed environment*, then map the proof's constants → their defining
+modules → the `import` to add (`searchCandidates` + the `modsOf` step in `Basic.lean`).
+Anything that (a) runs over a custom `Environment` and (b) yields an inspectable proof can
+plug into it. So "stronger `suggest?`" = **more searchers behind the same post-pass**, not
+a new engine. The clean refactor is a `Searcher := MVarId → MetaM (Array Hit)` abstraction
+that `suggestHits` runs as a panel (some members over the current env, some over the
+constructed env) and merges/ranks via `renderHits`.
+
+Three concrete additions, easiest first:
+
+### 1. Import-resolving `rw?` (recommended first; low risk)
+- **Reuse:** Mathlib's `rw?` engine, `Mathlib.Tactic.Rewrites` (`rewrites`/`rewriteCandidates`)
+  — the rewrite analogue of `librarySearch`, backed by its own discrimination tree of
+  `Eq`/`Iff` lemmas.
+- **Slot in:** run it over `constructedEnv`; each candidate is `(rewriteLemma, rewrittenGoal)`.
+  Emit a `Hit` with `tactic := s!"rw [{rewriteLemma}]"`, `mods := moduleOf rewriteLemma`, and
+  the rewritten goal as the "leaves" (it's naturally a *partial* match in our model).
+- **Gotchas:** many candidates (rank, cap); a rewrite usually transforms rather than closes,
+  so pair it with step 3 if you want "rw then close".
+
+### 2. A `hint`-style panel (medium)
+- **Reuse:** Mathlib's `hint` (`Mathlib.Tactic.Hint`) already runs a registered list of
+  tactics and reports which close the goal — read its harness for how to run a tactic
+  syntax against a goal mvar and detect closure.
+- **Slot in:** add *closed* procedures — `omega`, `ring`, `decide`, `simp`, `aesop` — run in
+  the **current** env (they don't reference unimported named lemmas, so `mods := []`, no
+  import needed). Keep the *search* members (`exact?`/`apply?`/`rw?`) on the constructed env.
+- **Gotchas:** ranking now spans tactic kinds — policy: full closers first, then fewer
+  imports, then partials. `simp` does NOT cross files cleanly (unimported `@[simp]` lemmas
+  aren't in the active simp set), so treat `simp?` as in-scope-only.
+
+### 3. Multi-step chaining via `aesop` over the constructed environment (research spike)
+- **Reuse:** `aesop` (already a dependency) does best-first *backward* multi-step search.
+  Programmatic entry via `Aesop.search` / the `Aesop.Frontend` API.
+- **Slot in:** run `aesop` over `constructedEnv`. On success, the goal mvar is assigned a
+  proof term → same post-pass extracts every lemma it used → the (possibly multiple)
+  imports. Suggest **`aesop`** as the tactic (after the imports are added, plain `aesop`
+  reproduces it) — or, more robustly, emit the explicit proof term validated by `roundTrips`.
+- **Gotchas (this is the hard part):**
+  - **Rule-set injection.** Unimported project lemmas aren't registered as `@[aesop]` rules,
+    so out of the box aesop won't *use* them. You must feed them in — e.g. take the
+    discrimination-tree candidates (as in `searchCandidates`) and pass them via
+    `aesop (add unsafe apply [...])`, or build a temporary local rule set. Getting this
+    scoping right is the crux.
+  - **Multi-import minimization** and **multi-line edits** in the code action.
+  - **Performance:** aesop over a full constructed env can be slow — bound its depth/time,
+    and only invoke it when the cheaper panel members come up empty.
+
+**Guiding principle:** keep the tool's identity — *cross-file search + import resolution*.
+Extend the panel with searchers that genuinely benefit from cross-file scope (`rw?` is the
+poster child); lean on `omega`/`ring`/`aesop` for breadth without trying to out-prove them.
+
 ## Provenance
 
 Extracted from a POC built inside `formalising-mathematics-notes`. The engine is a single

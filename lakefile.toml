@@ -1,0 +1,14 @@
+name = "LeanSuggest"
+defaultTargets = ["LeanSuggest"]
+
+# The code-action framework (`@[tactic_code_action]`, `TacticCodeAction`) lives in
+# Batteries. The rest of the engine uses Lean core (`Lean.Meta.Tactic.LibrarySearch`).
+# Pin a Batteries revision matching your toolchain (the one your Mathlib uses). If your
+# project already depends on Mathlib/Batteries, align this rev to avoid a version clash.
+[[require]]
+name = "batteries"
+git = "https://github.com/leanprover-community/batteries"
+rev = "v4.26.0"
+
+[[lean_lib]]
+name = "LeanSuggest"

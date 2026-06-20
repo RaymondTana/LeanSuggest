@@ -12,3 +12,10 @@ rev = "v4.26.0"
 
 [[lean_lib]]
 name = "LeanSuggest"
+
+# E2E test fixture: a tiny self-contained project the cross-file search runs against.
+# `Fixture.Defs` holds the symbols a consumer states goals about; `Fixture.Lemmas` holds
+# the proofs the consumer does NOT import — the gap `suggest?` closes. Not a default target
+# (consumers don't need it); built explicitly by `test/e2e.sh`.
+[[lean_lib]]
+name = "Fixture"

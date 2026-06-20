@@ -28,8 +28,8 @@ Full closers rank first. A `∀`-goal is `intro`'d so its conclusion head indexe
 (beating `exact?`), and the goal's local hypotheses are carried into the search.
 
 KNOWN LIMITATIONS (productionization TODO):
-* `projectRoots` is hardcoded — should be auto-discovered from the Lake setup
-  (the consuming project's `lean_lib` names) or read from a config key.
+* `projectRoots` isn't auto-discovered — overridable via the `LEANSUGGEST_ROOTS` env var
+  (`configuredRoots`), but the ideal is reading the consuming project's Lake `lean_lib` names.
 * `constructedEnvCache` is never invalidated — it goes stale when you rebuild the
   project. Should be keyed on a fingerprint of the project `.olean` mtimes/hashes.
 * `maxHeartbeats` is forced high to absorb the constructed-env build cost; this is
@@ -45,6 +45,19 @@ namespace LeanSuggest
     Each must be a *built* library root (its `.olean`s must exist — `lake build <root>`).
     TODO: auto-discover from the Lake configuration instead of hardcoding. -/
 def projectRoots : List Name := []  -- CONFIGURE: your project's built library root(s), e.g. [`MyProject]
+
+/-- The roots to actually search, allowing a runtime override via the `LEANSUGGEST_ROOTS`
+    environment variable (comma-separated, e.g. `LEANSUGGEST_ROOTS=MyProject` or `A,B`).
+    Falls back to `projectRoots`. This lets a consumer (or the E2E tests) point the search
+    at a built library without editing this file — a step toward the auto-discovery TODO. -/
+def configuredRoots : IO (List Name) := do
+  match (← IO.getEnv "LEANSUGGEST_ROOTS") with
+  | some s =>
+    let names := (s.splitOn ",").filterMap fun part =>
+      let part := part.trim
+      if part.isEmpty then none else some part.toName
+    return if names.isEmpty then projectRoots else names
+  | none => return projectRoots
 
 /-- Heartbeat budget for a search. The constructed environment builds the full library
     discrimination tree in-process on first use, which can exceed the default 200k; we
@@ -287,13 +300,13 @@ def runMetaOver {α : Type} (env : Environment) (opts : Options) (act : MetaM α
     `(import set, fingerprint of project olean mtimes)` and rebuild when that changes. -/
 initialize constructedEnvCache : IO.Ref (Option Environment) ← IO.mkRef none
 
-/-- The constructed environment: the file's imports plus `projectRoots`. Cached after the
+/-- The constructed environment: the file's imports plus `configuredRoots`. Cached after the
     first (expensive, ~30s) build; subsequent calls in the same process are fast.
     `trustLevel := 1024` matches Lake's olean trust; `loadExts := true` loads environment
     extensions so instance resolution etc. work during the search. -/
 def constructedEnv (cur : Environment) (opts : Options) : IO Environment := do
   if let some e ← constructedEnvCache.get then return e
-  let extra := projectRoots.toArray.map (fun m => { module := m : Import })
+  let extra := (← configuredRoots).toArray.map (fun m => { module := m : Import })
   let e ← importModules (cur.header.imports ++ extra) opts (trustLevel := 1024) (loadExts := true)
   constructedEnvCache.set (some e)
   return e

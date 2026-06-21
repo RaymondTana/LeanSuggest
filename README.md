@@ -48,15 +48,17 @@ leftover subgoals; rewrite lemmas as `rw […]` (or `rw [← …]`) with the rew
    only available in files that transitively import the module defining it; there is no
    global always-on tactic short of forking Lean core.)
 
-3. **Point it at your project.** Set the *built* library root(s) to search, either way:
-   - **Env var (no rebuild):** `LEANSUGGEST_ROOTS=MyProject` (comma-separated for several,
-     e.g. `A,B`). Read at search time by `configuredRoots`.
-   - **In source:** edit `projectRoots` in `LeanSuggest/Basic.lean`:
+3. **Point it at your project (usually nothing to do).** The library roots to search are
+   resolved in this order:
+   - **Zero-config (default):** if your project has a `lakefile.toml`, every `[[lean_lib]]`
+     in it is searched automatically — no env var, no edits.
+   - **Env var override:** `LEANSUGGEST_ROOTS=MyProject` (comma-separated, e.g. `A,B`) — to
+     search a subset, or for `lakefile.lean` projects (which the auto-scanner can't read).
+   - **In-source override:** edit `projectRoots` in `LeanSuggest/Basic.lean`:
      ```lean
      def projectRoots : List Name := [`MyProject]
      ```
-   Each root must have its `.olean`s built (`lake build MyProject`). With neither set (default
-   `[]`), `suggest?` only searches what your file already imports (no cross-file search).
+   Each root must have its `.olean`s built (`lake build MyProject`).
 
 ## Using it
 
@@ -80,25 +82,30 @@ suggestion and leaves the goal open — the **lightbulb** is what applies it (in
 `test/e2e.sh` is a self-contained, runnable demonstration of every cross-file capability —
 no Mathlib, no external project required. It builds a tiny fixture library (`Fixture/`) whose
 *definitions* (`Fixture.Defs`) and *lemmas* (`Fixture.Lemmas`) live in separate modules, runs
-`test/Demo.lean` (which imports only the definitions) against it via `LEANSUGGEST_ROOTS=Fixture`,
-and asserts the suggestions name the right lemma **and** the `import` to add:
+`test/Demo.lean` (which imports only the definitions), and asserts the suggestions name the
+right lemma **and** the `import` to add:
 
 ```
 bash test/e2e.sh        # builds, runs, asserts → "E2E PASS ✅"
 ```
 
-It exercises all four paths — cross-file `exact`, partial `apply`, **`rw`** (the rewrite
+It runs with **no `LEANSUGGEST_ROOTS` set**, so it also exercises the zero-config path
+(roots auto-discovered from `lakefile.toml`, which declares `Fixture`). The same reason it
+works in the editor with no setup: just open the repo and run `#suggest`/`suggest?`.
+
+It exercises all four cross-file paths — `exact`, partial `apply`, **`rw`** (the rewrite
 engine), and discharging a goal from a **local hypothesis** — each reported with its
-`[add: import Fixture.Lemmas]`. `test/Demo.lean` is also readable on its own as a worked
+`[add: import Fixture.Lemmas]`, plus the in-scope `omega`/`simp`/`trivial` panel.
+`test/Demo.lean` is also readable on its own as a worked
 example (open it and watch the InfoView).
 
 ## How it works (two tiers)
 
 1. Search the **current file's environment** (what `exact?` sees).
-2. If nothing in scope *closes* the goal, build a **constructed environment** — your
-   file's imports plus the configured roots (`LEANSUGGEST_ROOTS` / `projectRoots`) — and
-   search that. Each result records the module it came from, diffed against your file's
-   imports to produce the `import` to add.
+2. If nothing in scope *closes* the goal, build a **constructed environment** — your file's
+   imports plus the configured roots (auto-discovered from `lakefile.toml`, or
+   `LEANSUGGEST_ROOTS` / `projectRoots`) — and search that. Each result records the module it
+   came from, diffed against your file's imports to produce the `import` to add.
 
 A `∀`-goal is `intro`'d first so its conclusion indexes in the discrimination tree, and
 the goal's local hypotheses are carried into the search so premises can be discharged.
@@ -107,9 +114,10 @@ the goal's local hypotheses are carried into the search so premises can be disch
 
 These are the gaps a maintainer should tackle (also flagged in `Basic.lean`):
 
-- **`projectRoots` isn't auto-discovered.** It can be set without editing source via the
-  `LEANSUGGEST_ROOTS` env var (see Install §3), but the ideal is auto-discovery from the Lake
-  configuration (the consuming project's `lean_lib` names).
+- **Auto-discovery is `lakefile.toml`-only.** Roots are read from `[[lean_lib]]` entries via
+  a best-effort line scanner; `lakefile.lean` projects aren't parsed and need an explicit
+  `LEANSUGGEST_ROOTS` / `projectRoots` override. It also relies on the Lean server's cwd being
+  the Lake project root (it is, under `lake serve`).
 - **No cache invalidation.** The constructed environment is cached for the process and
   goes **stale** when you rebuild your project — restart the server to refresh. Should be
   keyed on a fingerprint of project `.olean` mtimes/hashes.

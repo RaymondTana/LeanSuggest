@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # End-to-end test for LeanSuggest's cross-file search + import resolution.
 #
-# Builds the engine and the `Fixture` test library, runs `test/Demo.lean` with the search
-# pointed at `Fixture`, and asserts the suggestions name the right lemmas AND the `import`
-# to add — the behaviour `exact?`/`apply?`/`rw?` cannot provide. Exits non-zero on any miss.
+# Builds the engine and the `Fixture` test library, runs `test/Demo.lean`, and asserts the
+# suggestions name the right lemmas AND the `import` to add — the behaviour
+# `exact?`/`apply?`/`rw?` cannot provide. Exits non-zero on any miss.
+#
+# No `LEANSUGGEST_ROOTS` is set: this exercises the *zero-config* path, where the search
+# roots are auto-discovered from `[[lean_lib]]` entries in lakefile.toml (which includes
+# `Fixture`). Pass it explicitly to test the override path instead.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 echo "── building LeanSuggest + Fixture ──"
 lake build LeanSuggest Fixture || { echo "FAIL: build failed"; exit 1; }
 
-echo "── running test/Demo.lean (LEANSUGGEST_ROOTS=Fixture) ──"
-out=$(LEANSUGGEST_ROOTS=Fixture lake env lean test/Demo.lean 2>&1)
+echo "── running test/Demo.lean (zero-config: roots auto-discovered from lakefile.toml) ──"
+out=$(lake env lean test/Demo.lean 2>&1)
 status=$?
 echo "$out"
 echo "────────────────────────────────────────────────────────"

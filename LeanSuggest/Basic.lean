@@ -28,8 +28,9 @@ Full closers rank first. A `∀`-goal is `intro`'d so its conclusion head indexe
 (beating `exact?`), and the goal's local hypotheses are carried into the search.
 
 KNOWN LIMITATIONS (productionization TODO):
-* `projectRoots` isn't auto-discovered — overridable via the `LEANSUGGEST_ROOTS` env var
-  (`configuredRoots`), but the ideal is reading the consuming project's Lake `lean_lib` names.
+* Roots are auto-discovered from `lakefile.toml` `[[lean_lib]]` names (`configuredRoots`),
+  overridable via `LEANSUGGEST_ROOTS` / `projectRoots`. A `lakefile.lean` project can't be
+  scanned, so those must use an explicit override.
 * `constructedEnvCache` is never invalidated — it goes stale when you rebuild the
   project. Should be keyed on a fingerprint of the project `.olean` mtimes/hashes.
 * `maxHeartbeats` is forced high to absorb the constructed-env build cost; this is
@@ -46,18 +47,46 @@ namespace LeanSuggest
     TODO: auto-discover from the Lake configuration instead of hardcoding. -/
 def projectRoots : List Name := []  -- CONFIGURE: your project's built library root(s), e.g. [`MyProject]
 
-/-- The roots to actually search, allowing a runtime override via the `LEANSUGGEST_ROOTS`
-    environment variable (comma-separated, e.g. `LEANSUGGEST_ROOTS=MyProject` or `A,B`).
-    Falls back to `projectRoots`. This lets a consumer (or the E2E tests) point the search
-    at a built library without editing this file — a step toward the auto-discovery TODO. -/
+/-- Parse a comma/whitespace/newline-separated list of module names, ignoring blanks. -/
+def parseRootList (s : String) : List Name :=
+  (s.splitToList (fun c => c == ',' || c == '\n' || c == ' ' || c == '\t')).filterMap fun part =>
+    let part := part.trim
+    if part.isEmpty then none else some part.toName
+
+/-- Auto-discover the project's library roots from `lakefile.toml` in the current working
+    directory (the Lake project root, which is where the Lean server runs): the `name` of
+    every `[[lean_lib]]`. Returns `[]` if there's no `lakefile.toml` (e.g. a `lakefile.lean`
+    project) or it declares no libraries. Best-effort line scanner, not a full TOML parser:
+    it tracks the current `[[…]]` table and reads `name = "…"` only inside `[[lean_lib]]`. -/
+def discoverRootsFromToml : IO (List Name) := do
+  let path : System.FilePath := (← IO.currentDir) / "lakefile.toml"
+  if !(← path.pathExists) then return []
+  let content ← IO.FS.readFile path
+  let mut roots : List Name := []
+  let mut inLib := false
+  for raw in content.splitOn "\n" do
+    let line := raw.trim
+    if line.startsWith "[" then
+      inLib := line.startsWith "[[lean_lib]]"
+    else if inLib && line.startsWith "name" && (line.drop 4).trim.startsWith "=" then
+      match line.splitOn "\"" with
+      | _ :: v :: _ => roots := roots ++ [v.toName]
+      | _           => pure ()
+  return roots.eraseDups
+
+/-- The library roots to search, resolved in priority order:
+    1. the `LEANSUGGEST_ROOTS` env var (comma-separated, e.g. `MyProject` or `A,B`), if set;
+    2. `projectRoots`, if you've hardcoded it above;
+    3. **zero-config auto-discovery**: every `[[lean_lib]]` in the project's `lakefile.toml`.
+    So a `lakefile.toml` project gets cross-file search with no setup at all; the env var and
+    `projectRoots` are explicit overrides (to search a subset, or for `lakefile.lean` projects
+    this scanner can't read). Each root still needs its `.olean`s built. -/
 def configuredRoots : IO (List Name) := do
-  match (← IO.getEnv "LEANSUGGEST_ROOTS") with
-  | some s =>
-    let names := (s.splitOn ",").filterMap fun part =>
-      let part := part.trim
-      if part.isEmpty then none else some part.toName
-    return if names.isEmpty then projectRoots else names
-  | none => return projectRoots
+  if let some s ← IO.getEnv "LEANSUGGEST_ROOTS" then
+    let ns := parseRootList s
+    if !ns.isEmpty then return ns
+  if !projectRoots.isEmpty then return projectRoots
+  try discoverRootsFromToml catch _ => return []
 
 /-- Heartbeat budget for a search. The constructed environment builds the full library
     discrimination tree in-process on first use, which can exceed the default 200k; we

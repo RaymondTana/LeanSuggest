@@ -51,6 +51,16 @@ check "local-hyp closer found"      "Fixture.sparkly_of_shiny h"
 # 5. Closed-tactic (hint-style) panel: a core tactic closes the goal, no import.
 check "hint tactic closer found"    "1. omega"
 
+# Golden tests: `test/Guarded.lean` pins exact #suggest output via #guard_msgs; it elaborates
+# silently iff every message matches (a drift makes it fail to elaborate, with a diff).
+echo "── running test/Guarded.lean (#guard_msgs golden tests) ──"
+if gout=$(lake env lean test/Guarded.lean 2>&1) && [ -z "$gout" ]; then
+  echo "  ok   — golden #guard_msgs match"
+else
+  echo "  MISS — golden tests drifted:"; echo "$gout"
+  fail=1
+fi
+
 echo "────────────────────────────────────────────────────────"
 if [ "$fail" -eq 0 ]; then
   echo "E2E PASS ✅"

@@ -1,6 +1,6 @@
 # LeanSuggest
 
-[![CI](https://github.com/<you>/LeanSuggest/actions/workflows/ci.yml/badge.svg)](https://github.com/<you>/LeanSuggest/actions/workflows/ci.yml)
+[![CI](https://github.com/RaymondTana/LeanSuggest/actions/workflows/ci.yml/badge.svg)](https://github.com/RaymondTana/LeanSuggest/actions/workflows/ci.yml)
 
 `suggest?` — library search for Lean 4 that **crosses file boundaries** and **resolves imports**.
 
@@ -28,7 +28,7 @@ import first, then full closers with imports, then partial matches.
    ```toml
    [[require]]
    name = "LeanSuggest"
-   git = "https://github.com/<you>/LeanSuggest"   # or a local `path = "..."`
+   git = "https://github.com/RaymondTana/LeanSuggest"   # or a local `path = "..."`
    ```
    ```
    lake update LeanSuggest

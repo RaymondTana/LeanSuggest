@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  e2e:
+    name: Build & E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain itself (~1 GB) is fetched by elan on the first `lake` call,
+      # pinned by `lean-toolchain`; cache it so warm runs skip the download.
+      - name: Cache elan + toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ hashFiles('lean-toolchain') }}
+
+      # Build artifacts for LeanSuggest, Fixture, and the Batteries dependency.
+      # Keyed on the manifest so a `lake update` invalidates; restore-keys lets a
+      # partially matching cache still warm the Batteries build.
+      - name: Cache lake artifacts
+        uses: actions/cache@v4
+        with:
+          path: .lake
+          key: lake-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}
+          restore-keys: |
+            lake-${{ runner.os }}-
+
+      - name: Install elan
+        run: |
+          if [ ! -x "$HOME/.elan/bin/elan" ]; then
+            curl -sSfL https://elan.lean-lang.org/elan-init.sh | sh -s -- -y --default-toolchain none
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      # Builds LeanSuggest + Fixture, runs test/Demo.lean and asserts on its output
+      # (cross-file exact/apply/rw/local-hyp/hint paths), then the #guard_msgs goldens.
+      - name: Run end-to-end tests
+        run: bash test/e2e.sh

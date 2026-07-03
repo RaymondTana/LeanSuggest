@@ -1,233 +1,171 @@
 # LeanSuggest
 
-`suggest?` — a library-search tactic that **crosses file boundaries** and **resolves imports**.
+`suggest?` — library search for Lean 4 that **crosses file boundaries** and **resolves imports**.
 
-It extends `exact?`/`apply?` along two axes:
-
-- **Scope** — when no *imported* lemma closes your goal, it also searches the rest of
-  your project (lemmas you haven't imported).
-- **Actionability** — it reports the lemma *and the `import` line* that brings it into
-  scope, and a one-click code action inserts the import + replaces the tactic.
-
-It reuses the same `MetaM` procedures as `exact?`/`apply?` (`librarySearch`'s candidate
-finder, `mkLibrarySearchLemma`, `apply`, `solveByElim`) — it does not call those tactics —
-and drives its own candidate loop so it can return **multiple** results and **partial**
-matches (`apply`, à la `apply?`), not just the first full closer.
-
-It also runs Lean core's **`rw?` engine** (`Lean.Meta.Rewrites`) over the same scopes, so it
-suggests **rewrite** lemmas — including ones from unimported modules, with the `import` to
-add. (This is the first roadmap item, now built; see "Roadmap" below.)
+`exact?`, `apply?`, and `rw?` can only see what your file imports, and they answer with
+just a lemma name. `suggest?` runs the same engines over your **whole project** —
+including modules you haven't imported — and answers with the lemma, the `import` line
+that makes it available, and a one-click code action that inserts both.
 
 ## What you get
 
 | Form | Kind | Use |
 |------|------|-----|
-| `suggest?` | tactic | use in a `by` block, exactly where you'd use `exact?`/`apply?` |
-| `#suggest (T)` | command | top-level query (like `#check`/`#eval`), no proof needed |
-| 💡 lightbulb | LSP code action | on a `suggest?` tactic: one click inserts the import + replaces it |
+| `suggest?` | tactic | in a `by` block, exactly where you'd use `exact?`/`apply?` |
+| `#suggest (T)` | command | top-level query (like `#check`), no proof needed |
+| 💡 lightbulb | LSP code action | one click: insert the `import` + replace the tactic |
 
-Full closers are suggested as `exact …`; partial matches as `apply …` with their
-leftover subgoals; rewrite lemmas as `rw […]` (or `rw [← …]`) with the rewritten goal
-(or "closes by rfl"). Full `exact` closers rank first.
+Full closers are suggested as `exact …`; partial matches as `apply …` with their leftover
+subgoals; rewrites as `rw [lemma]` (or `rw [← lemma]`) with the rewritten goal; plus a
+small closed-tactic panel (`omega`/`simp`/`trivial`). Ranking: full closers needing no
+import first, then full closers with imports, then partial matches.
 
 ## Install
 
-1. **Add the dependency** to your project's `lakefile.toml`:
+1. **Require it** in your project's `lakefile.toml`, then fetch once:
    ```toml
    [[require]]
    name = "LeanSuggest"
-   git = "https://github.com/<you>/LeanSuggest"   # or a local `path = "..."`
+   git = "https://github.com/RaymondTana/LeanSuggest.git"   # or a local `path = "..."`
    ```
-   then run `lake update LeanSuggest` once.
-
-2. **Import it** where you want the tactic:
+   ```
+   lake update LeanSuggest
+   ```
+2. **Import it**:
    ```lean
    import LeanSuggest
    ```
-   (Tip: put this in a base file your other files already import — in Lean a tactic is
-   only available in files that transitively import the module defining it; there is no
-   global always-on tactic short of forking Lean core.)
+   This one import activates the tactic, the command, and the lightbulb in that file. A
+   tactic only exists in files that transitively import its defining module, so put the
+   import in a base file the rest of your project already imports.
+3. **Build your project** (`lake build`). The cross-file search reads compiled `.olean`
+   files, so only built lemmas are findable.
 
-3. **Point it at your project (usually nothing to do).** The library roots to search are
-   resolved in this order:
-   - **Zero-config (default):** if your project has a `lakefile.toml`, every `[[lean_lib]]`
-     in it is searched automatically — no env var, no edits.
-   - **Env var override:** `LEANSUGGEST_ROOTS=MyProject` (comma-separated, e.g. `A,B`) — to
-     search a subset, or for `lakefile.lean` projects (which the auto-scanner can't read).
-   - **In-source override:** edit `projectRoots` in `LeanSuggest/Basic.lean`:
-     ```lean
-     def projectRoots : List Name := [`MyProject]
-     ```
-   Each root must have its `.olean`s built (`lake build MyProject`).
+That's it — no configuration. Every `[[lean_lib]]` in your `lakefile.toml` is searched.
+
+### Configuration (only when the default is wrong)
+
+The roots to search are resolved in this order (first non-empty wins):
+
+1. **The `leanSuggest.roots` option** — per file, like any option:
+   ```lean
+   set_option leanSuggest.roots "MyProject,MyLib"
+   ```
+   or project-wide in *your* `lakefile.toml`:
+   ```toml
+   leanOptions = { weak.leanSuggest.roots = "MyProject" }
+   ```
+   (`weak.` is required in the lakefile form: Lake passes `leanOptions` as `-D` flags,
+   validated before LeanSuggest is imported, and `weak.` defers that check. `set_option`
+   needs no prefix.)
+2. **The `LEANSUGGEST_ROOTS` env var** (comma-separated) — handy for CI or CLI runs.
+3. **Auto-discovery** from `lakefile.toml` — the zero-config default.
+
+Reach for 1 or 2 to search a subset of your libraries, or if your project uses
+`lakefile.lean` (the auto-scanner reads TOML only). Each root must be built.
 
 ## Using it
 
 ```lean
 import LeanSuggest
 
--- in a proof: behaves like exact?/apply?, but also finds unimported project lemmas
+-- behaves like exact?/apply?, but also finds unimported project lemmas:
 example : MyGoal := by suggest?
 
 -- as a query, no proof needed:
 #suggest (MyGoal)
 ```
 
-When `suggest?` finds an *unimported* lemma it cannot close the goal itself (the kernel
-would reject a proof term naming a constant the file hasn't imported), so it reports the
-suggestion and leaves the goal open — the **lightbulb** is what applies it (inserts the
-`import` and replaces `suggest?` with the `exact …`/`apply …`).
+When the closer is already imported, `suggest?` closes the goal and offers "Try this",
+exactly like `exact?`. When it lives in an *unimported* module, Lean would reject the
+proof (it names constants the file can't see), so the goal stays open and the result is
+reported:
 
-## End-to-end test / demo
+```
+suggest? — suggestions:
+  1. exact fun n => Fixture.isShiny_all n    [add: import Fixture.Lemmas]
+```
 
-`test/e2e.sh` is a self-contained, runnable demonstration of every cross-file capability —
-no Mathlib, no external project required. It builds a tiny fixture library (`Fixture/`) whose
-*definitions* (`Fixture.Defs`) and *lemmas* (`Fixture.Lemmas`) live in separate modules, runs
-`test/Demo.lean` (which imports only the definitions), and asserts the suggestions name the
-right lemma **and** the `import` to add:
+The **lightbulb** is what applies it: one click inserts the `import` at the end of your
+import header and replaces `suggest?` with the suggested tactic.
+
+## How it works
+
+Two phases:
+
+1. **In scope** — search everything the file imports: the same `librarySearch` machinery
+   behind `exact?`/`apply?`, Lean core's `rw?` engine, and the closed-tactic panel. A full
+   in-scope closer ends the search.
+2. **Cross-file** — otherwise, construct an environment of the file's imports **plus the
+   configured roots** (loaded from the project's `.olean`s) and run the same searches
+   over it.
+
+Import resolution is a search-agnostic post-pass: collect the constants named by the
+found proof term, keep the ones the file can't already see, and map each to its defining
+module — those modules are the imports to add. Because it inspects proof terms, it works
+uniformly for library-search hits, rewrites, and even `simp` (a `simp` proof names the
+`@[simp]` lemmas it used, so a cross-file `simp` closer reports the imports that make it
+work). Hits that would require the file to import *itself* — a stale copy of the current
+module reaches phase 2 via the roots — are dropped.
+
+The constructed environment is cached per process and invalidated by fingerprinting the
+roots' `.olean` mtimes, so a `lake build` refreshes it. A `∀`-goal is `intro`'d first,
+and the goal's local hypotheses are carried into both phases so premises can be
+discharged.
+
+## What it is (and isn't)
+
+- **Vs. `exact?` / `apply?` / `rw?`:** same search engines, deliberately — this is a thin
+  layer adding *scope* (unimported project files) and *actionability* (import + one-click
+  fix), not a smarter search.
+- **Vs. Loogle / LeanSearch / Moogle:** those are lemma search engines — good for "does
+  Mathlib have something like this?" — but they don't see your goal in context, don't
+  verify the lemma applies, don't know your local project, and leave the import to you.
+- **Vs. `aesop` / `polyrith` / hammers:** those chain many steps to find whole proofs.
+  `suggest?` is single-step by design: one library lemma plus a bounded `solve_by_elim`
+  cleanup of side goals.
+
+The gap it fills: you proved a lemma in one file of your project and are working in
+another that doesn't import it. `exact?` can't see it, search engines don't know your
+project exists, and nothing types the `import` line for you. `suggest?` automates exactly
+that, end to end.
+
+## Limitations
+
+- **First cross-file query is slow (~30s)** — it loads the constructed environment.
+  Cached after; a rebuild of your project invalidates the cache (by design). The cache is
+  a single entry, so alternating between files with disjoint imports rebuilds it.
+  `maxHeartbeats` is forced high to absorb this cost.
+- **Only built lemmas are visible** — phase 2 reads `.olean`s, so run `lake build` after
+  proving something new.
+- **Project scope, not Mathlib scope.** Searching *all* of Mathlib for unimported lemmas
+  would need every Mathlib `.olean` present and gigabytes of RAM, so it's not enabled;
+  Mathlib modules you already import are searched like anything else.
+- **`lakefile.lean` projects need explicit roots** (`leanSuggest.roots` or
+  `LEANSUGGEST_ROOTS`); auto-discovery reads `lakefile.toml` only, and assumes the Lean
+  server's cwd is the Lake project root (it is, under `lake serve`).
+- **Version alignment:** LeanSuggest pins a Batteries revision per toolchain; if your
+  project uses Mathlib, its Batteries must be compatible or Lake will complain.
+- **∀-quantified equality goals lose symm-awareness** (the `∀` branch uses the plain
+  candidate finder).
+
+## Development
+
+The engine is a single file, [`LeanSuggest/Basic.lean`](LeanSuggest/Basic.lean). Design
+notes, scope discussion, and the roadmap live in [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ```
 bash test/e2e.sh        # builds, runs, asserts → "E2E PASS ✅"
 ```
 
-It runs with **no `LEANSUGGEST_ROOTS` set**, so it also exercises the zero-config path
-(roots auto-discovered from `lakefile.toml`, which declares `Fixture`). The same reason it
-works in the editor with no setup: just open the repo and run `#suggest`/`suggest?`.
+The end-to-end test is a self-contained demo (no Mathlib needed): a tiny fixture library
+splits *definitions* (`Fixture.Defs`) from *lemmas* (`Fixture.Lemmas`), and
+[`test/Demo.lean`](test/Demo.lean) — which imports only the definitions — exercises every
+cross-file path (`exact`, partial `apply`, `rw`, local-hypothesis discharge, the closed-
+tactic panel), asserting each suggestion names the right lemma **and** the right
+`import`. `test/Guarded.lean` pins exact outputs via `#guard_msgs`. CI runs all of it on
+every push and PR ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
-It exercises all four cross-file paths — `exact`, partial `apply`, **`rw`** (the rewrite
-engine), and discharging a goal from a **local hypothesis** — each reported with its
-`[add: import Fixture.Lemmas]`, plus the in-scope `omega`/`simp`/`trivial` panel.
-`test/Demo.lean` is also readable on its own as a worked
-example (open it and watch the InfoView).
+## License
 
-## How it works (two tiers)
-
-1. Search the **current file's environment** (what `exact?` sees).
-2. If nothing in scope *closes* the goal, build a **constructed environment** — your file's
-   imports plus the configured roots (auto-discovered from `lakefile.toml`, or
-   `LEANSUGGEST_ROOTS` / `projectRoots`) — and search that. Each result records the module it
-   came from, diffed against your file's imports to produce the `import` to add.
-
-A `∀`-goal is `intro`'d first so its conclusion indexes in the discrimination tree, and
-the goal's local hypotheses are carried into the search so premises can be discharged.
-
-## Caveats / known limitations (productionization TODO)
-
-These are the gaps a maintainer should tackle (also flagged in `Basic.lean`):
-
-- **Auto-discovery is `lakefile.toml`-only.** Roots are read from `[[lean_lib]]` entries via
-  a best-effort line scanner; `lakefile.lean` projects aren't parsed and need an explicit
-  `LEANSUGGEST_ROOTS` / `projectRoots` override. It also relies on the Lean server's cwd being
-  the Lake project root (it is, under `lake serve`).
-- **No cache invalidation.** The constructed environment is cached for the process and
-  goes **stale** when you rebuild your project — restart the server to refresh. Should be
-  keyed on a fingerprint of project `.olean` mtimes/hashes.
-- **Cold start is slow** (~30s) the first time the constructed environment is built
-  (it imports the project + its dependencies); cached after.
-- **`maxHeartbeats` is forced high** to absorb that build cost — a workaround, not
-  something `exact?`/`apply?` need.
-- **Full-Mathlib search isn't enabled.** Searching all of Mathlib (not just your project)
-  would require every Mathlib `.olean` present (`lake exe cache get`) and gigabytes of RAM.
-- **Broad `catch _`** swallows genuine errors (robust, but hides bugs).
-- **∀-quantified equality goals lose symm-awareness** (the `∀` branch uses the plain
-  finder, not the symm-aware one).
-
-## Scope vs. general "library-search is dumb" critiques
-
-LeanSuggest is a **thin layer** over `exact?`/`apply?` that adds **scope**
-(cross-file / unimported) and **actionability** (import resolution + a code action).
-It deliberately does **not** try to make the underlying *search* smarter, so the common
-critique list of `apply?` (multi-step chaining, rewriting, case-splits, ML ranking, …) is
-mostly **orthogonal** to this tool. Note too that several such critiques are factually off
-about `apply?` as it stands: it **does** use local hypotheses (via `solveByElim`), **is**
-symm-aware, **does** rank by discrimination-tree relevance, and **does** emit `refine … ?_`
-when metavariables remain.
-
-Genuinely accurate limitations that LeanSuggest **inherits** (and that are non-goals here —
-separate tools already exist):
-
-- **Single-step only** — one library lemma + bounded `solveByElim`; no multi-tactic
-  chaining (that's "hammer" territory). The partial-match output (`apply …` leaving
-  subgoals) is the only nod toward partial progress.
-- **Suggests `exact`/`apply`/`rw` and a small set of closed tactics** (`omega`/`simp`/
-  `trivial`, via the `hint`-style panel) — not `cases`/`induction`, and not full
-  multi-tactic chaining. (`rw?` and the closed-tactic panel are covered — see Roadmap §1–2.)
-
-The first idea that *extended this tool along its own axis* — an **import-resolving
-`rw?`**, suggesting a rewrite lemma from an unimported module together with its `import` —
-is now **built** (see "Roadmap" §1). It was the natural sequel: more searcher behind the
-same import-resolving post-pass, not a fix to the search engine.
-
-## Roadmap: a stronger `suggest?` (panel + shared post-pass)
-
-The import-resolution here is a **tactic-agnostic post-pass**: run a proof-producing
-search over the *constructed environment*, then map the proof's constants → their defining
-modules → the `import` to add (`searchCandidates` + the `modsOf` step in `Basic.lean`).
-Anything that (a) runs over a custom `Environment` and (b) yields an inspectable proof can
-plug into it. So "stronger `suggest?`" = **more searchers behind the same post-pass**, not
-a new engine. This refactor is now in place: a `Searcher := Environment → Expr → MetaM (Array
-Hit)` abstraction with a `panel : List Searcher` that `allHits` runs and merges/ranks (full
-closers first). Adding a searcher means **appending one entry to `panel`** — nothing else
-changes. (The signature is `(baseline, type)` rather than the originally-sketched `MVarId`,
-because both existing members create their own goal mvar and run in the ambient local
-context; the panel runs over whatever env the caller set — current or constructed.)
-
-Three concrete additions, easiest first:
-
-### 1. Import-resolving `rw?` — ✅ **DONE**
-- **Reuse:** Lean **core**'s `rw?` engine, `Lean.Meta.Rewrites` (`findRewrites` /
-  `rewriteCandidates`, with `createModuleTreeRef` + `localHypotheses`) — the rewrite analogue
-  of `librarySearch`, backed by its own discrimination tree of `Eq`/`Iff` lemmas. *(This
-  engine moved from Mathlib into Lean core, so — unlike the original plan — it adds **no
-  Mathlib dependency**; it's reused exactly like `librarySearch`.)*
-- **Built as:** `rewriteHits` in `Basic.lean` runs `findRewrites` over the search env; each
-  result becomes a `Hit` with `kind := .rewrite`, `tactic := "rw [lemma]"` (or `rw [← lemma]`),
-  `mods` diffed against the baseline env (the cross-file import payoff), and the rewritten goal
-  (or "closes by rfl") as its display. `allHits` merges these with the `exact`/`apply` hits and
-  ranks full closers first. `=`/`↔` **local hypotheses** are offered as rewrites too.
-- **Status / next:** a rewrite *transforms* rather than closes, so rw hits are reported (and
-  applied via the lightbulb), never auto-`exact`'d — pair with step 3 for "rw then close".
-  `rewriteHits` and `searchCandidates` are now uniform `panel` members (see the `Searcher`
-  refactor above), so the next additions just append to `panel`.
-
-### 2. A `hint`-style panel — ✅ **DONE**
-- **Built as:** `hintHits` runs a list of closed tactics (`hintTactics := ["omega", "simp",
-  "trivial"]`) against the goal — parsing each as `tactic` syntax and running it via
-  `Lean.Elab.Tactic.run` — and keeps the ones that leave no subgoals (à la Mathlib's `hint`,
-  but reusing only **Lean core** tactics, so no Mathlib/aesop dependency). Each becomes a
-  `Hit` with `kind := .tacticClose`, `tactic := "omega"` (etc.), `mods := []`. Reported as the
-  tactic to run, never auto-`exact`'d. Add a tactic by appending to `hintTactics`.
-- **Ranking implemented:** `allHits` now orders **full closers first, then fewer imports,
-  then partials** — so a no-import closer (`omega`, or an in-scope lemma) outranks an
-  import-needing one.
-- **Notes:** these are in-scope procedures; if one closes the goal the two-tier logic never
-  reaches the cross-file search, so they effectively only matter over the current env.
-  `decide` is intentionally excluded (can blow up). `ring`/`aesop` are left out to avoid a
-  Mathlib/aesop dependency — add them if your project already depends on them. `simp` does
-  NOT cross files cleanly (unimported `@[simp]` lemmas aren't in the active simp set), so it
-  stays in-scope-only — which the panel already is.
-
-### 3. Multi-step chaining via `aesop` over the constructed environment (research spike)
-- **Reuse:** `aesop` (already a dependency) does best-first *backward* multi-step search.
-  Programmatic entry via `Aesop.search` / the `Aesop.Frontend` API.
-- **Slot in:** run `aesop` over `constructedEnv`. On success, the goal mvar is assigned a
-  proof term → same post-pass extracts every lemma it used → the (possibly multiple)
-  imports. Suggest **`aesop`** as the tactic (after the imports are added, plain `aesop`
-  reproduces it) — or, more robustly, emit the explicit proof term validated by `roundTrips`.
-- **Gotchas (this is the hard part):**
-  - **Rule-set injection.** Unimported project lemmas aren't registered as `@[aesop]` rules,
-    so out of the box aesop won't *use* them. You must feed them in — e.g. take the
-    discrimination-tree candidates (as in `searchCandidates`) and pass them via
-    `aesop (add unsafe apply [...])`, or build a temporary local rule set. Getting this
-    scoping right is the crux.
-  - **Multi-import minimization** and **multi-line edits** in the code action.
-  - **Performance:** aesop over a full constructed env can be slow — bound its depth/time,
-    and only invoke it when the cheaper panel members come up empty.
-
-**Guiding principle:** keep the tool's identity — *cross-file search + import resolution*.
-Extend the panel with searchers that genuinely benefit from cross-file scope (`rw?` is the
-poster child); lean on `omega`/`ring`/`aesop` for breadth without trying to out-prove them.
-
-## Provenance
-
-Extracted from a POC built inside `formalising-mathematics-notes`. The engine is a single
-file, `LeanSuggest/Basic.lean`.
+Apache 2.0 — see [LICENSE](LICENSE).

@@ -1,5 +1,7 @@
 # LeanSuggest
 
+[![CI](https://github.com/<you>/LeanSuggest/actions/workflows/ci.yml/badge.svg)](https://github.com/<you>/LeanSuggest/actions/workflows/ci.yml)
+
 `suggest?` — library search for Lean 4 that **crosses file boundaries** and **resolves imports**.
 
 `exact?`, `apply?`, and `rw?` can only see what your file imports, and they answer with
@@ -26,7 +28,7 @@ import first, then full closers with imports, then partial matches.
    ```toml
    [[require]]
    name = "LeanSuggest"
-   git = "https://github.com/RaymondTana/LeanSuggest.git"   # or a local `path = "..."`
+   git = "https://github.com/<you>/LeanSuggest"   # or a local `path = "..."`
    ```
    ```
    lake update LeanSuggest
@@ -105,8 +107,9 @@ found proof term, keep the ones the file can't already see, and map each to its 
 module — those modules are the imports to add. Because it inspects proof terms, it works
 uniformly for library-search hits, rewrites, and even `simp` (a `simp` proof names the
 `@[simp]` lemmas it used, so a cross-file `simp` closer reports the imports that make it
-work). Hits that would require the file to import *itself* — a stale copy of the current
-module reaches phase 2 via the roots — are dropped.
+work). Hits whose `import` would create a cycle are dropped — whether the needed module
+is the current file itself (a stale compiled copy of it reaches phase 2 via the roots) or
+any module that transitively imports the current file.
 
 The constructed environment is cached per process and invalidated by fingerprinting the
 roots' `.olean` mtimes, so a `lake build` refreshes it. A `∀`-goal is `intro`'d first,

@@ -3,29 +3,47 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch/PR supersedes any in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   e2e:
-    name: Build & E2E
-    runs-on: ubuntu-latest
+    name: Build & E2E (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # TODO windows-latest: the elan install step below assumes a POSIX shell.
+        # To enable, add a Windows-conditional install (elan-init.ps1) and verify
+        # ~/.elan path handling under the pwsh/bash shell mix on a real run.
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
-      # The toolchain itself (~1 GB) is fetched by elan on the first `lake` call,
-      # pinned by `lean-toolchain`; cache it so warm runs skip the download.
-      - name: Cache elan + toolchain
-        uses: actions/cache@v4
+      # Restore/save are split so caches are saved even on a failed run — the expensive
+      # part (cold toolchain download + Batteries build) happens before the assertions,
+      # and a red assertion run shouldn't force the next push to rebuild from scratch.
+      - name: Restore elan + toolchain cache
+        id: cache-elan
+        uses: actions/cache/restore@v4
         with:
           path: ~/.elan
           key: elan-${{ runner.os }}-${{ hashFiles('lean-toolchain') }}
 
-      # Build artifacts for LeanSuggest, Fixture, and the Batteries dependency.
-      # Keyed on the manifest so a `lake update` invalidates; restore-keys lets a
-      # partially matching cache still warm the Batteries build.
-      - name: Cache lake artifacts
-        uses: actions/cache@v4
+      - name: Restore lake build artifacts
+        id: cache-lake
+        uses: actions/cache/restore@v4
         with:
           path: .lake
           key: lake-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}
@@ -43,3 +61,17 @@ jobs:
       # (cross-file exact/apply/rw/local-hyp/hint paths), then the #guard_msgs goldens.
       - name: Run end-to-end tests
         run: bash test/e2e.sh
+
+      - name: Save elan + toolchain cache
+        if: always() && steps.cache-elan.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ hashFiles('lean-toolchain') }}
+
+      - name: Save lake build artifacts
+        if: always() && steps.cache-lake.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .lake
+          key: lake-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}

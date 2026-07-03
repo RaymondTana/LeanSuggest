@@ -97,20 +97,45 @@ def moduleOf (env : Environment) (n : Name) : Name :=
   | some i => env.header.moduleNames[i]?.getD .anonymous
   | none   => .anonymous
 
+/-- The names of every module in `env` whose import closure contains `target`, plus
+    `target` itself. Adding an `import` of any of these to `target`'s source file would
+    create an import cycle.
+
+    Marks modules by forward passes over the module list: the loader stores a module after
+    its imports, so one pass normally converges; looping to a fixpoint keeps the result
+    correct without relying on that ordering. -/
+def reverseImportClosure (env : Environment) (target : Name) : NameSet := Id.run do
+  let mods := env.header.moduleNames.zip env.header.moduleData
+  let mut marked : NameSet := ({} : NameSet).insert target
+  let mut changed := true
+  while changed do
+    changed := false
+    for (n, d) in mods do
+      if !marked.contains n && d.imports.any (fun imp => marked.contains imp.module) then
+        marked := marked.insert n
+        changed := true
+  return marked
+
 /-- The imports a term still needs beyond `base`: the defining module of every constant
     `base` lacks. (`base.contains` subsumes any "universally imported" allowlist — whatever
     the file already reaches, `Init` included, never shows up as needed.)
 
-    Returns `none` when the term depends on the module currently being elaborated — a stale
-    copy of it reaches the constructed environment via the project roots, and importing a
-    file into itself is circular — so callers must drop such a hit entirely.
+    Returns `none` when the term depends on the module currently being elaborated **or on
+    any module that transitively imports it** — a stale copy of the current module reaches
+    the constructed environment via the project roots, and adding such an `import` to the
+    current file would create an import cycle — so callers must drop such a hit entirely.
 
     Runs in the environment the term was found in (current or constructed). -/
 def neededImports (base : Environment) (e : Expr) : MetaM (Option (List Name)) := do
   let env ← getEnv
   let needed := (collectConsts e).toList.filter fun c => !base.contains c
   let mods := (needed.map (moduleOf env)).filter (· != .anonymous) |>.eraseDups
-  if base.mainModule != .anonymous && mods.contains base.mainModule then return none
+  -- In-scope hits (phase 1, or cross-file hits already covered by imports) skip the
+  -- cycle check entirely — it only costs anything for genuinely cross-file hits.
+  if mods.isEmpty then return some []
+  if base.mainModule != .anonymous then
+    let cyclic := reverseImportClosure env base.mainModule
+    if mods.any cyclic.contains then return none
   return some mods
 
 /-- Validate a suggestion, ensuring its pretty-printed term parses and gets re-elaborated

@@ -387,7 +387,21 @@ def constructedEnv (cur : Environment) (opts : Options) : IO Environment := do
     if cached == fingerprints && wanted.all (e.header.moduleNames.contains ·) then
       return e
   let extra := roots.toArray.map (fun m => { module := m : Import })
-  let e ← importModules (cur.header.imports ++ extra) opts (trustLevel := 1024) (loadExts := true)
+  -- `loadExts := true` is required: without extension state the search silently degrades
+  -- (wrong/missing suggestions).
+  -- Problem: a runtime `importModules` can't run `initialize` blocks as as native code
+  -- in modules outside the server's startup import closure, and fails with an interpreter
+  -- error ("cannot evaluate [init] declaration ...").
+  let e ← try
+      importModules (cur.header.imports ++ extra) opts (trustLevel := 1024) (loadExts := true)
+    catch ex =>
+      throw <| IO.userError s!"suggest?: failed to load the cross-file search environment \
+        (roots: {roots}).\n{ex.toString}\n\
+        If the error above mentions an `[init]` declaration, one of the roots pulls in a \
+        module whose initializer only exists as native code (common in Mathlib's \
+        pp/tactic layers). Workaround: narrow `leanSuggest.roots` to the module subtrees \
+        you actually want searched (e.g. \"Mathlib.Algebra.Group\" rather than a root \
+        importing all of Mathlib)."
   constructedEnvCache.set (some (fingerprints, e))
   return e
 

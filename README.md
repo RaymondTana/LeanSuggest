@@ -29,6 +29,7 @@ import first, then full closers with imports, then partial matches.
    [[require]]
    name = "LeanSuggest"
    git = "https://github.com/RaymondTana/LeanSuggest"   # or a local `path = "..."`
+   rev = "v4.26.0"                                      # pin the tag matching your toolchain
    ```
    ```
    lake update LeanSuggest
